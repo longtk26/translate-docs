@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { Upload, X, FileText, AlertCircle } from "lucide-react";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
@@ -6,6 +6,8 @@ import { Progress } from "~/components/ui/progress";
 import { Badge } from "~/components/ui/badge";
 import { FILE_UPLOAD } from "~/constants";
 import type { UploadFile } from "~/types";
+import { getPresignedUploadUrls } from "~/lib/api";
+import { uploadFileToS3 } from "~/lib/s3-upload";
 
 interface FileUploadZoneProps {
     onFilesSelected: (files: UploadFile[]) => void;
@@ -18,6 +20,7 @@ export function FileUploadZone({
 }: FileUploadZoneProps) {
     const [isDragging, setIsDragging] = useState(false);
     const [uploadingFiles, setUploadingFiles] = useState<UploadFile[]>([]);
+    const abortControllersRef = useRef<Map<string, () => void>>(new Map());
 
     const validateFile = (file: File): string | null => {
         if (file.size > FILE_UPLOAD.MAX_SIZE) {
@@ -32,7 +35,7 @@ export function FileUploadZone({
     };
 
     const handleFiles = useCallback(
-        (files: FileList) => {
+        async (files: FileList) => {
             const fileArray = Array.from(files);
 
             if (fileArray.length + uploadingFiles.length > maxFiles) {
@@ -52,41 +55,95 @@ export function FileUploadZone({
             });
 
             setUploadingFiles((prev) => [...prev, ...newFiles]);
-            onFilesSelected(newFiles.filter((f) => f.status !== "error"));
 
-            // Simulate upload progress
-            newFiles.forEach((uploadFile) => {
-                if (uploadFile.status === "uploading") {
-                    simulateUpload(uploadFile.id);
-                }
-            });
+            const validFiles = newFiles.filter((f) => f.status !== "error");
+            onFilesSelected(validFiles);
+
+            if (validFiles.length === 0) return;
+
+            try {
+                // Request presigned URLs from the backend
+                const { signed_urls } = await getPresignedUploadUrls(
+                    validFiles.map((f) => ({
+                        name: f.file.name,
+                        mime_type: f.file.type,
+                    })),
+                    "uploads",
+                );
+
+                // Upload each file to S3 using the presigned POST URL
+                validFiles.forEach((uploadFile, index) => {
+                    const presignedPost = signed_urls[index];
+                    if (!presignedPost) {
+                        setUploadingFiles((prev) =>
+                            prev.map((f) =>
+                                f.id === uploadFile.id
+                                    ? {
+                                          ...f,
+                                          status: "error",
+                                          error: "No presigned URL received",
+                                      }
+                                    : f,
+                            ),
+                        );
+                        return;
+                    }
+
+                    const { promise, abort } = uploadFileToS3(
+                        uploadFile.file,
+                        uploadFile.id,
+                        presignedPost,
+                        (progress) => {
+                            setUploadingFiles((prev) =>
+                                prev.map((f) =>
+                                    f.id === progress.fileId
+                                        ? {
+                                              ...f,
+                                              progress: progress.progress,
+                                              status: progress.status,
+                                              error: progress.error,
+                                          }
+                                        : f,
+                                ),
+                            );
+                        },
+                    );
+
+                    abortControllersRef.current.set(uploadFile.id, abort);
+
+                    promise
+                        .then(() => {
+                            abortControllersRef.current.delete(uploadFile.id);
+                        })
+                        .catch(() => {
+                            abortControllersRef.current.delete(uploadFile.id);
+                        });
+                });
+            } catch (err) {
+                // If fetching presigned URLs fails, mark all valid files as error
+                const errorMessage =
+                    err instanceof Error
+                        ? err.message
+                        : "Failed to get upload URLs";
+                setUploadingFiles((prev) =>
+                    prev.map((f) =>
+                        validFiles.some((vf) => vf.id === f.id)
+                            ? { ...f, status: "error", error: errorMessage }
+                            : f,
+                    ),
+                );
+            }
         },
         [uploadingFiles, maxFiles, onFilesSelected],
     );
 
-    const simulateUpload = (fileId: string) => {
-        let progress = 0;
-        const interval = setInterval(() => {
-            progress += Math.random() * 30;
-            if (progress >= 100) {
-                progress = 100;
-                clearInterval(interval);
-                setUploadingFiles((prev) =>
-                    prev.map((f) =>
-                        f.id === fileId
-                            ? { ...f, progress: 100, status: "success" }
-                            : f,
-                    ),
-                );
-            } else {
-                setUploadingFiles((prev) =>
-                    prev.map((f) => (f.id === fileId ? { ...f, progress } : f)),
-                );
-            }
-        }, 500);
-    };
-
     const removeFile = (fileId: string) => {
+        // Abort in-flight upload if still running
+        const abort = abortControllersRef.current.get(fileId);
+        if (abort) {
+            abort();
+            abortControllersRef.current.delete(fileId);
+        }
         setUploadingFiles((prev) => prev.filter((f) => f.id !== fileId));
     };
 

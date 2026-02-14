@@ -4,7 +4,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Config(BaseSettings):
     app_name: str = "My FastAPI Application"
     port: int = 8000
+    
+    # Database
     db_url: str 
+    postgres_user: str
+    postgres_password: str
+    postgres_db: str
 
     # AWS 
     aws_access_key_id: str

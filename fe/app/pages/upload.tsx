@@ -34,7 +34,7 @@ export default function Upload() {
         });
 
     const handleFilesSelected = (files: UploadFile[]) => {
-        console.log("Files selected:", files);
+        setUploadedFiles((prev) => [...prev, ...files]);
     };
 
     const handleConfigChange = (config: Partial<TranslationConfig>) => {
