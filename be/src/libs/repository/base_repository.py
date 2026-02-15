@@ -11,6 +11,10 @@ class BaseRepository:
         self.session.add(obj)
         return obj
 
+    def create_many(self, objs: list[SQLModel]) -> list[SQLModel]:
+        self.session.add_all(objs)
+        return objs
+
     def find(self, id: int) -> SQLModel | None:
         return self.session.get(self._model, id)
    
